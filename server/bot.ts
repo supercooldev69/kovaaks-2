@@ -145,8 +145,20 @@ function buildProfileEmbed(
   descParts.push("");
   descParts.push(`[Open Benchmarks](${exvlUrl})`);
 
-  embed.setDescription(descParts.join("\n"));
+  embed.setDescription(truncateDescription(descParts.join("\n")));
   return embed;
+}
+
+function truncateDescription(text: string, limit = 4096): string {
+  if (text.length <= limit) return text;
+  const suffix = "\n\n*(truncated)*";
+  const lines = text.split("\n");
+  let result = "";
+  for (const line of lines) {
+    if ((result + "\n" + line + suffix).length > limit) break;
+    result += (result ? "\n" : "") + line;
+  }
+  return result + suffix;
 }
 
 export const client = new Client({
@@ -166,6 +178,7 @@ process.on("unhandledRejection", (reason: any) => {
 });
 
 const pendingGuildMap = new Map<string, string>();
+let syncInProgress = false;
 
 const commands = [
   new SlashCommandBuilder()
@@ -189,7 +202,7 @@ export async function registerCommands() {
   }
 }
 
-async function buildMainMenu(_isAdmin?: boolean) {
+async function buildMainMenu() {
   const players = await storage.getPlayers();
   const playerCount = players.length;
   let onlineCount = 0;
@@ -428,18 +441,33 @@ async function syncGuestRole(guild: Guild) {
   }
 }
 
+interface DividerRoles {
+  voltaicDivider: any | undefined;
+  viscoseDivider: any | undefined;
+  jpDivider: any | undefined;
+  languageDivider: any | undefined;
+}
+
+function findDividerRoles(roles: ReturnType<typeof Map.prototype.values> & Iterable<any>): DividerRoles {
+  const rolesArr = Array.from(roles);
+  return {
+    voltaicDivider: rolesArr.find((r: any) => r.name.toLowerCase().includes("voltaic") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked")),
+    viscoseDivider: rolesArr.find((r: any) => r.name.toLowerCase().includes("viscose") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked")),
+    jpDivider: rolesArr.find((r: any) => r.name.toLowerCase().includes("jade palace") && !r.name.includes("Complete") && !r.name.startsWith("JP ")),
+    languageDivider: rolesArr.find((r: any) => r.name.toLowerCase().includes("language") && !r.name.toLowerCase().includes("french") && !r.name.toLowerCase().includes("german") && !r.name.toLowerCase().includes("russian") && !r.name.toLowerCase().includes("spanish") && !r.name.toLowerCase().includes("english") && !r.name.toLowerCase().includes("dutch") && !r.name.toLowerCase().includes("portuguese")),
+  };
+}
+
 async function syncDividerAndUnrankedRoles(guild: Guild) {
   try {
     const roles = await guild.roles.fetch();
     const members = guild.members.cache.size > 0 ? guild.members.cache : await guild.members.fetch();
 
-    const voltaicDivider = roles.find(r => r.name.toLowerCase().includes("voltaic") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const viscoseDivider = roles.find(r => r.name.toLowerCase().includes("viscose") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const jpDivider = roles.find(r => r.name.toLowerCase().includes("jade palace") && !r.name.includes("Complete") && !r.name.startsWith("JP "));
+    const dividers = findDividerRoles(roles.values());
+    const { voltaicDivider, viscoseDivider, jpDivider, languageDivider } = dividers;
     const unrankedVoltaic = roles.find(r => r.name.toLowerCase().includes("unranked") && r.name.toLowerCase().includes("voltaic"));
     const unrankedViscose = roles.find(r => r.name.toLowerCase().includes("unranked") && r.name.toLowerCase().includes("viscose"));
     let unrankedJP = roles.find(r => r.name.toLowerCase().includes("unranked") && r.name.toLowerCase().includes("jp"));
-    const languageDivider = roles.find(r => r.name.toLowerCase().includes("language") && !r.name.toLowerCase().includes("french") && !r.name.toLowerCase().includes("german") && !r.name.toLowerCase().includes("russian") && !r.name.toLowerCase().includes("spanish") && !r.name.toLowerCase().includes("english") && !r.name.toLowerCase().includes("dutch") && !r.name.toLowerCase().includes("portuguese"));
 
     if (!unrankedJP) {
       try {
@@ -559,7 +587,7 @@ async function syncDividerAndUnrankedRoles(guild: Guild) {
 async function fixLanguageOrder(guild: Guild) {
   try {
     const roles = await guild.roles.fetch();
-    const languageDivider = roles.find(r => r.name.toLowerCase().includes("language") && !r.name.toLowerCase().includes("french") && !r.name.toLowerCase().includes("german") && !r.name.toLowerCase().includes("russian") && !r.name.toLowerCase().includes("spanish") && !r.name.toLowerCase().includes("english") && !r.name.toLowerCase().includes("dutch") && !r.name.toLowerCase().includes("portuguese"));
+    const { languageDivider } = findDividerRoles(roles.values());
 
     if (!languageDivider) return;
 
@@ -605,22 +633,19 @@ async function syncDividerRolesForMember(guild: Guild, memberId: string) {
     }
     if (member.user.bot) return;
 
-    const voltaicDivider = roles.find(r => r.name.toLowerCase().includes("voltaic") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const viscoseDivider = roles.find(r => r.name.toLowerCase().includes("viscose") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const jpDivider = roles.find(r => r.name.toLowerCase().includes("jade palace") && !r.name.includes("Complete") && !r.name.startsWith("JP "));
-    const languageDivider = roles.find(r => r.name.toLowerCase().includes("language") && !r.name.toLowerCase().includes("french") && !r.name.toLowerCase().includes("german") && !r.name.toLowerCase().includes("russian") && !r.name.toLowerCase().includes("spanish") && !r.name.toLowerCase().includes("english") && !r.name.toLowerCase().includes("dutch") && !r.name.toLowerCase().includes("portuguese"));
+    const dividers = findDividerRoles(roles.values());
 
-    if (voltaicDivider && !member.roles.cache.has(voltaicDivider.id)) {
-      await member.roles.add(voltaicDivider, "AimDB: adding voltaic divider");
+    if (dividers.voltaicDivider && !member.roles.cache.has(dividers.voltaicDivider.id)) {
+      await member.roles.add(dividers.voltaicDivider, "AimDB: adding voltaic divider");
     }
-    if (viscoseDivider && !member.roles.cache.has(viscoseDivider.id)) {
-      await member.roles.add(viscoseDivider, "AimDB: adding viscose divider");
+    if (dividers.viscoseDivider && !member.roles.cache.has(dividers.viscoseDivider.id)) {
+      await member.roles.add(dividers.viscoseDivider, "AimDB: adding viscose divider");
     }
-    if (jpDivider && !member.roles.cache.has(jpDivider.id)) {
-      await member.roles.add(jpDivider, "AimDB: adding jade palace divider");
+    if (dividers.jpDivider && !member.roles.cache.has(dividers.jpDivider.id)) {
+      await member.roles.add(dividers.jpDivider, "AimDB: adding jade palace divider");
     }
-    if (languageDivider && !member.roles.cache.has(languageDivider.id)) {
-      await member.roles.add(languageDivider, "AimDB: adding language divider");
+    if (dividers.languageDivider && !member.roles.cache.has(dividers.languageDivider.id)) {
+      await member.roles.add(dividers.languageDivider, "AimDB: adding language divider");
     }
 
     const unrankedVoltaic = roles.find(r => r.name.toLowerCase().includes("unranked") && r.name.toLowerCase().includes("voltaic"));
@@ -921,9 +946,10 @@ async function arrangeAllBenchmarkRoles(guild: Guild, trackingRoleMap: Map<strin
   try {
     const roles = await guild.roles.fetch();
 
-    const voltaicAnchor = roles.find(r => r.name.toLowerCase().includes("voltaic") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const viscoseAnchor = roles.find(r => r.name.toLowerCase().includes("viscose") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.toLowerCase().includes("unranked"));
-    const jpAnchor = roles.find(r => r.name.toLowerCase().includes("jade palace") && !r.name.includes("Complete") && !r.name.includes("Tracking") && !r.name.startsWith("JP "));
+    const anchors = findDividerRoles(roles.values());
+    const voltaicAnchor = anchors.voltaicDivider;
+    const viscoseAnchor = anchors.viscoseDivider;
+    const jpAnchor = anchors.jpDivider;
 
     if (!viscoseAnchor && !voltaicAnchor && !jpAnchor) {
       log(`No anchor roles found (Viscose/Voltaic/Jade Palace) — skipping arrangement`, "discord");
@@ -1087,6 +1113,11 @@ async function arrangeAllBenchmarkRoles(guild: Guild, trackingRoleMap: Map<strin
 }
 
 async function syncBenchmarkRoles(guild: Guild) {
+  if (syncInProgress) {
+    log("Benchmark role sync already in progress, skipping", "discord");
+    return;
+  }
+  syncInProgress = true;
   try {
     const allPlayers = await storage.getPlayers();
     if (allPlayers.length === 0) return;
@@ -1191,6 +1222,8 @@ async function syncBenchmarkRoles(guild: Guild) {
     await arrangeAllBenchmarkRoles(guild, trackingRoleMap);
   } catch (e: any) {
     console.error("Failed to sync benchmark roles:", e?.message);
+  } finally {
+    syncInProgress = false;
   }
 }
 
@@ -1209,16 +1242,31 @@ async function syncBenchmarkRolesForPlayer(guild: Guild, discordId: string, stea
     }
 
     const trackingEntries = Array.from(trackingRoleMap.entries());
+    const rolesToAdd: any[] = [];
+    const rolesToRemove: any[] = [];
     for (const [roleName, role] of trackingEntries) {
       const hasRole = member.roles.cache.has(role.id);
       const shouldHave = desiredSet.has(roleName);
-
       if (shouldHave && !hasRole) {
-        await member.roles.add(role, `AimDB: earned ${roleName}`);
-        log(`Added "${roleName}" to ${member.user.username}`, "discord");
+        rolesToAdd.push(role);
+        log(`Adding "${roleName}" to ${member.user.username}`, "discord");
       } else if (!shouldHave && hasRole) {
-        await member.roles.remove(role, `AimDB: no longer qualifies for ${roleName}`);
-        log(`Removed "${roleName}" from ${member.user.username}`, "discord");
+        rolesToRemove.push(role);
+        log(`Removing "${roleName}" from ${member.user.username}`, "discord");
+      }
+    }
+    if (rolesToAdd.length > 0) {
+      try {
+        await member.roles.add(rolesToAdd, "AimDB: earned benchmark roles");
+      } catch (e: any) {
+        console.error(`Failed to add roles to ${member.user.username}:`, e?.message);
+      }
+    }
+    if (rolesToRemove.length > 0) {
+      try {
+        await member.roles.remove(rolesToRemove, "AimDB: no longer qualifies for benchmark roles");
+      } catch (e: any) {
+        console.error(`Failed to remove roles from ${member.user.username}:`, e?.message);
       }
     }
   } catch (e: any) {
@@ -1309,7 +1357,7 @@ client.on("ready", async () => {
   log(`Serving ${client.guilds.cache.size} server(s)`, "discord");
 
   try {
-    const guild = await client.guilds.fetch("1457464164300882058");
+    const guild = await client.guilds.fetch(TARGET_GUILD_ID);
     log(`Successfully fetched guild: ${guild.name} (${guild.id})`, "discord");
     const roles = await guild.roles.fetch();
     const members = await guild.members.fetch();
@@ -1477,7 +1525,8 @@ client.on("userUpdate", async (oldUser, newUser) => {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === "aimdb") {
-      await interaction.reply(await buildMainMenu(false));
+      await interaction.deferReply();
+      await interaction.editReply(await buildMainMenu());
       return;
     }
 
@@ -1515,10 +1564,14 @@ client.on("interactionCreate", async (interaction) => {
   } catch (error) {
     console.error("Interaction error:", error);
     const msg = { content: "Something went wrong. Please try again.", ephemeral: true };
-    if ("replied" in interaction && (interaction as any).replied) {
-      await (interaction as any).followUp(msg);
-    } else if ("reply" in interaction) {
-      await (interaction as any).reply(msg).catch(() => {});
+    try {
+      if ("replied" in interaction && ((interaction as any).replied || (interaction as any).deferred)) {
+        await (interaction as any).followUp(msg);
+      } else if ("reply" in interaction) {
+        await (interaction as any).reply(msg);
+      }
+    } catch {
+      // Interaction may have expired, nothing we can do
     }
   }
 });
@@ -1667,7 +1720,8 @@ async function handleButton(interaction: ButtonInteraction) {
     }
 
     case "menu_back": {
-      await interaction.update(await buildMainMenu());
+      await interaction.deferUpdate();
+      await interaction.editReply(await buildMainMenu());
       break;
     }
   }
@@ -1703,15 +1757,15 @@ async function handleUserSelect(interaction: UserSelectMenuInteraction) {
       ]);
       const steam = steamProfiles.length > 0 ? steamProfiles[0] : null;
 
-      const livePositions2 = new Map<number, number | null>();
+      const livePositions = new Map<number, number | null>();
       await Promise.all(
         TRACKED_BENCHMARKS.map(async (bench) => {
           const progress = await getKovaaksBenchmarkProgress(player.steamId, bench.id);
-          livePositions2.set(bench.id, progress ? getAvgLeaderboardRank(progress) : null);
+          livePositions.set(bench.id, progress ? getAvgLeaderboardRank(progress) : null);
         })
       );
 
-      const embed = buildProfileEmbed(player, steam, benchmarks, livePositions2);
+      const embed = buildProfileEmbed(player, steam, benchmarks, livePositions);
       await interaction.editReply({
         content: null,
         embeds: [embed],
@@ -1721,7 +1775,7 @@ async function handleUserSelect(interaction: UserSelectMenuInteraction) {
     }
 
     case "select_addplayer": {
-      if (!checkIsAdmin(interaction)) return;
+      if (!checkIsAdmin(interaction)) { await denyPermission(interaction); return; }
       const existing = await storage.getPlayerByDiscordId(selectedUser.id);
       if (existing) {
         await interaction.update({
@@ -1738,7 +1792,9 @@ async function handleUserSelect(interaction: UserSelectMenuInteraction) {
       }
 
       if (interaction.guildId) {
-        pendingGuildMap.set(`add_${selectedUser.id}_${interaction.user.id}`, interaction.guildId);
+        const mapKey = `add_${selectedUser.id}_${interaction.user.id}`;
+        pendingGuildMap.set(mapKey, interaction.guildId);
+        setTimeout(() => pendingGuildMap.delete(mapKey), 5 * 60 * 1000);
       }
 
       const modal = new ModalBuilder()
@@ -1759,7 +1815,7 @@ async function handleUserSelect(interaction: UserSelectMenuInteraction) {
     }
 
     case "select_updateplayer": {
-      if (!checkIsAdmin(interaction)) return;
+      if (!checkIsAdmin(interaction)) { await denyPermission(interaction); return; }
       const player = await storage.getPlayerByDiscordId(selectedUser.id);
       if (!player) {
         await interaction.update({
@@ -1794,7 +1850,7 @@ async function handleUserSelect(interaction: UserSelectMenuInteraction) {
     }
 
     case "select_removeplayer": {
-      if (!checkIsAdmin(interaction)) return;
+      if (!checkIsAdmin(interaction)) { await denyPermission(interaction); return; }
       const player = await storage.getPlayerByDiscordId(selectedUser.id);
       if (!player) {
         await interaction.update({
@@ -1848,8 +1904,8 @@ function backButton() {
   );
 }
 
-async function denyPermission(interaction: ButtonInteraction) {
-  await interaction.reply({
+async function denyPermission(interaction: ButtonInteraction | UserSelectMenuInteraction) {
+  const msg = {
     embeds: [
       new EmbedBuilder()
         .setColor(0xFF4444)
@@ -1858,13 +1914,20 @@ async function denyPermission(interaction: ButtonInteraction) {
     ],
     components: [backButton()],
     ephemeral: true,
-  });
+  };
+  if (interaction.isUserSelectMenu()) {
+    await interaction.update({ ...msg, content: null });
+  } else {
+    await interaction.reply(msg);
+  }
 }
 
 async function handleListPlayers(interaction: ButtonInteraction) {
+  await interaction.deferReply({ ephemeral: true });
+
   const players = await storage.getPlayers();
   if (players.length === 0) {
-    await interaction.reply({
+    await interaction.editReply({
       embeds: [
         new EmbedBuilder()
           .setColor(0x6B7280)
@@ -1872,7 +1935,6 @@ async function handleListPlayers(interaction: ButtonInteraction) {
           .setDescription("The tracker database is empty.")
       ],
       components: [backButton()],
-      ephemeral: true,
     });
     return;
   }
@@ -1881,16 +1943,15 @@ async function handleListPlayers(interaction: ButtonInteraction) {
     `**${i + 1}.** <@${p.discordId}> — [${p.steamId}](https://evxl.app/u/${p.steamId})`
   ).join("\n");
 
-  await interaction.reply({
+  await interaction.editReply({
     embeds: [
       new EmbedBuilder()
         .setColor(0x7C3AED)
         .setTitle(`Tracked Players (${players.length})`)
-        .setDescription(playerList)
+        .setDescription(truncateDescription(playerList))
         .setTimestamp()
     ],
     components: [backButton()],
-    ephemeral: true,
   });
 }
 
@@ -1956,17 +2017,17 @@ async function handleLeaderboard(interaction: ButtonInteraction) {
   const voltaicBenches = TRACKED_BENCHMARKS.filter(b => [459, 458, 460].includes(b.id));
   const jpBenches = TRACKED_BENCHMARKS.filter(b => JP_BENCHMARK_IDS.has(b.id));
 
-  const allResults = await Promise.all(
-    TRACKED_BENCHMARKS.map(async (bench) => {
-      const results = await Promise.all(
-        players.map(async (p) => {
-          const benchmark = await getExvlBenchmark(p.steamId, bench.id);
-          return { player: p, benchmark, avgPos: null as number | null };
-        })
-      );
-      return { bench, results };
-    })
-  );
+  // Fetch one benchmark at a time to avoid blasting the API with N*M concurrent requests
+  const allResults: { bench: typeof TRACKED_BENCHMARKS[0]; results: { player: typeof players[0]; benchmark: ExvlBenchmarkEntry | null; avgPos: number | null }[] }[] = [];
+  for (const bench of TRACKED_BENCHMARKS) {
+    const results = await Promise.all(
+      players.map(async (p) => {
+        const benchmark = await getExvlBenchmark(p.steamId, bench.id);
+        return { player: p, benchmark, avgPos: null as number | null };
+      })
+    );
+    allResults.push({ bench, results });
+  }
 
   const resultMap = new Map(allResults.map(r => [r.bench.id, r.results]));
 
@@ -2035,7 +2096,7 @@ async function handleLeaderboard(interaction: ButtonInteraction) {
     return;
   }
 
-  const desc = sections.join("\n\n").slice(0, 4090);
+  const desc = truncateDescription(sections.join("\n\n"));
 
   await interaction.editReply({
     embeds: [
@@ -2109,7 +2170,7 @@ async function handleNowPlaying(interaction: ButtonInteraction) {
     sections.push("Nobody is playing KovaaK's or Ark right now.");
   }
 
-  const description = sections.join("\n\n");
+  const description = truncateDescription(sections.join("\n\n"));
 
   await interaction.editReply({
     embeds: [
@@ -2142,40 +2203,36 @@ async function handleActivity(interaction: ButtonInteraction) {
 
   await interaction.deferReply({ ephemeral: true });
 
-  const activityData: {
-    player: typeof players[0];
-    kovaaksHours2w: number;
-    totalEnergyChange: number;
-  }[] = [];
+  const activityData = await Promise.all(
+    players.map(async (player) => {
+      const [kovaaksMinutes, latestSnap] = await Promise.all([
+        getKovaaksRecentPlaytime(player.steamId),
+        storage.getLatestSnapshot(player.steamId),
+      ]);
 
-  for (const player of players) {
-    const [kovaaksMinutes, latestSnap] = await Promise.all([
-      getKovaaksRecentPlaytime(player.steamId),
-      storage.getLatestSnapshot(player.steamId),
-    ]);
-
-    let totalEnergyChange = 0;
-    if (latestSnap) {
-      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      const oldSnaps = await storage.getSnapshotsSince(player.steamId, weekAgo);
-      if (oldSnaps.length >= 2) {
-        const oldest = oldSnaps[0];
-        const newest = oldSnaps[oldSnaps.length - 1];
-        const oldEnergies: Record<string, number> = JSON.parse(oldest.benchmarkEnergies || "{}");
-        const newEnergies: Record<string, number> = JSON.parse(newest.benchmarkEnergies || "{}");
-        for (const key of Object.keys(newEnergies)) {
-          const diff = newEnergies[key] - (oldEnergies[key] || 0);
-          if (diff > 0) totalEnergyChange += diff;
+      let totalEnergyChange = 0;
+      if (latestSnap) {
+        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const oldSnaps = await storage.getSnapshotsSince(player.steamId, weekAgo);
+        if (oldSnaps.length >= 2) {
+          const oldest = oldSnaps[0];
+          const newest = oldSnaps[oldSnaps.length - 1];
+          const oldEnergies = (oldest.benchmarkEnergies || {}) as Record<string, number>;
+          const newEnergies = (newest.benchmarkEnergies || {}) as Record<string, number>;
+          for (const key of Object.keys(newEnergies)) {
+            const diff = newEnergies[key] - (oldEnergies[key] || 0);
+            if (diff > 0) totalEnergyChange += diff;
+          }
         }
       }
-    }
 
-    activityData.push({
-      player,
-      kovaaksHours2w: Math.round(kovaaksMinutes / 60 * 10) / 10,
-      totalEnergyChange: Math.round(totalEnergyChange * 10) / 10,
-    });
-  }
+      return {
+        player,
+        kovaaksHours2w: Math.round(kovaaksMinutes / 60 * 10) / 10,
+        totalEnergyChange: Math.round(totalEnergyChange * 10) / 10,
+      };
+    })
+  );
 
   const grinders = activityData
     .filter(d => d.kovaaksHours2w > 0)
@@ -2219,7 +2276,7 @@ async function handleActivity(interaction: ButtonInteraction) {
       new EmbedBuilder()
         .setColor(0x7C3AED)
         .setTitle("\u{1F4C8} Activity Report")
-        .setDescription(sections.join("\n\n").slice(0, 4096))
+        .setDescription(truncateDescription(sections.join("\n\n")))
         .setFooter({ text: `${grinders.length} active \u00B7 ${inactive.length} inactive \u00B7 ${players.length} tracked` })
         .setTimestamp()
     ],
@@ -2238,6 +2295,14 @@ async function handleModal(interaction: ModalSubmitInteraction) {
 
     const discordId = customId.replace("modal_addplayer_", "");
     const steamId = interaction.fields.getTextInputValue("steamid").trim();
+
+    if (!/^7656119\d{10}$/.test(steamId)) {
+      await interaction.reply({
+        content: "Invalid Steam ID. Must be a 17-digit Steam ID 64 (e.g. 76561198012345678).",
+        ephemeral: true,
+      });
+      return;
+    }
 
     let discordUsername = discordId;
     try {
@@ -2306,6 +2371,14 @@ async function handleModal(interaction: ModalSubmitInteraction) {
 
     const discordId = customId.replace("modal_updateplayer_", "");
     const newSteamId = interaction.fields.getTextInputValue("steamid").trim();
+
+    if (!/^7656119\d{10}$/.test(newSteamId)) {
+      await interaction.reply({
+        content: "Invalid Steam ID. Must be a 17-digit Steam ID 64 (e.g. 76561198012345678).",
+        ephemeral: true,
+      });
+      return;
+    }
 
     let discordUsername = discordId;
     try {

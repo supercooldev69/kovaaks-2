@@ -8,7 +8,7 @@ import {
   type PlayerResponse,
   type ActivitySnapshot,
 } from "@shared/schema";
-import { eq, desc, and, gte } from "drizzle-orm";
+import { eq, desc, and, gte, sql } from "drizzle-orm";
 
 export interface IStorage {
   getPlayers(): Promise<PlayerResponse[]>;
@@ -27,7 +27,7 @@ export interface IStorage {
 
 export class DatabaseStorage implements IStorage {
   async getPlayers(): Promise<PlayerResponse[]> {
-    return await db.select().from(players).orderBy(players.updatedAt);
+    return await db.select().from(players).orderBy(desc(players.updatedAt));
   }
 
   async getPlayerByDiscordId(discordId: string): Promise<PlayerResponse | undefined> {
@@ -45,10 +45,18 @@ export class DatabaseStorage implements IStorage {
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(players.id, id))
       .returning();
+    if (!updated) {
+      throw new Error(`Player with id ${id} not found`);
+    }
     return updated;
   }
 
   async deletePlayer(id: number): Promise<void> {
+    const [player] = await db.select({ steamId: players.steamId }).from(players).where(eq(players.id, id));
+    if (player) {
+      await db.delete(activitySnapshots).where(eq(activitySnapshots.steamId, player.steamId));
+      await db.delete(scenarioPbs).where(eq(scenarioPbs.steamId, player.steamId));
+    }
     await db.delete(players).where(eq(players.id, id));
   }
 
@@ -56,7 +64,7 @@ export class DatabaseStorage implements IStorage {
     await db.insert(activitySnapshots).values({
       steamId,
       kovaaksMinutes2w,
-      benchmarkEnergies: JSON.stringify(benchmarkEnergies),
+      benchmarkEnergies,
     });
   }
 
@@ -78,13 +86,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getAllLatestSnapshots(): Promise<ActivitySnapshot[]> {
-    const allPlayers = await this.getPlayers();
-    const snapshots: ActivitySnapshot[] = [];
-    for (const p of allPlayers) {
-      const snap = await this.getLatestSnapshot(p.steamId);
-      if (snap) snapshots.push(snap);
-    }
-    return snapshots;
+    return await db.execute(sql`
+      SELECT DISTINCT ON (steam_id) *
+      FROM activity_snapshots
+      ORDER BY steam_id, snapshot_at DESC
+    `) as unknown as ActivitySnapshot[];
   }
 
   async getScenarioPb(steamId: string, scenarioName: string): Promise<number | null> {
@@ -94,14 +100,13 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertScenarioPb(steamId: string, scenarioName: string, score: number): Promise<void> {
-    const existing = await this.getScenarioPb(steamId, scenarioName);
-    if (existing === null) {
-      await db.insert(scenarioPbs).values({ steamId, scenarioName, bestScore: score });
-    } else if (score > existing) {
-      await db.update(scenarioPbs)
-        .set({ bestScore: score, updatedAt: new Date() })
-        .where(and(eq(scenarioPbs.steamId, steamId), eq(scenarioPbs.scenarioName, scenarioName)));
-    }
+    await db.insert(scenarioPbs)
+      .values({ steamId, scenarioName, bestScore: score })
+      .onConflictDoUpdate({
+        target: [scenarioPbs.steamId, scenarioPbs.scenarioName],
+        set: { bestScore: score, updatedAt: new Date() },
+        where: sql`${scenarioPbs.bestScore} < ${score}`,
+      });
   }
 
   async getScenarioPbs(steamId: string): Promise<Record<string, number>> {

@@ -1,6 +1,7 @@
-import { storage } from "./storage";
-
-const STEAM_API_KEY = process.env.STEAM_API_KEY!;
+const STEAM_API_KEY = process.env.STEAM_API_KEY;
+if (!STEAM_API_KEY) {
+  throw new Error("STEAM_API_KEY must be set.");
+}
 const KOVAAKS_APP_ID = 824270;
 const ARK_SE_APP_ID = 346110;
 const ARK_SA_APP_ID = 2399830;
@@ -228,7 +229,7 @@ export const JP_HARD_RANKS = ["Grandmaster", "Nova", "Astra", "Celestial", "Tran
 
 export const ALL_VISCOSE_RANKS = Array.from(new Set([...VISCOSE_EASY_RANKS, ...VISCOSE_MEDIUM_RANKS, ...VISCOSE_HARD_RANKS]));
 export const ALL_VOLTAIC_RANKS = Array.from(new Set([...VOLTAIC_NOV_RANKS, ...VOLTAIC_INT_RANKS, ...VOLTAIC_ADV_RANKS]));
-export const ALL_JP_RANKS = Array.from(new Set([...JP_EASY_RANKS, ...JP_HARD_RANKS]));
+export const ALL_JP_RANKS = Array.from(new Set([...JP_FUNDAMENTALS_RANKS, ...JP_EASY_RANKS, ...JP_HARD_RANKS]));
 export const ALL_BENCHMARK_RANKS = Array.from(new Set([...ALL_VISCOSE_RANKS, ...ALL_VOLTAIC_RANKS, ...ALL_JP_RANKS]));
 
 export const BENCHMARK_RANK_MAP: Record<number, string[]> = {
@@ -246,7 +247,6 @@ export const BENCHMARK_RANK_MAP: Record<number, string[]> = {
 export interface BenchmarkScenarioConfig {
   benchmarkId: number;
   ranks: string[];
-  expectedCategories?: number;
 }
 
 export const BENCHMARK_SCENARIO_CONFIGS: Record<number, BenchmarkScenarioConfig> = {
@@ -326,12 +326,10 @@ const VISCOSE_TRACKING_CATEGORIES = new Set([
 export function getScenarioRankFromProgress(
   progress: KovaaksBenchmarkProgress,
   ranks: string[],
-  expectedCategories?: number,
 ): { trackingRank: string | null; isAllCategoriesComplete: boolean; completeRank: string | null; categoryDetails: { category: string; rank: number; maxRank: number }[] } {
   const categoryDetails: { category: string; rank: number; maxRank: number }[] = [];
   let minAllScenarioRank = Infinity;
   const trackingScenarioRanks: number[] = [];
-  const returnedCategoryCount = Object.keys(progress.categories).length;
 
   for (const [catName, cat] of Object.entries(progress.categories)) {
     categoryDetails.push({ category: catName, rank: cat.category_rank, maxRank: cat.rank_maxes.length });
@@ -381,12 +379,6 @@ export function getScenarioRankFromProgress(
   const trackingIdx = Math.min(trackingRankNum, ranks.length) - 1;
   const trackingRank = ranks[trackingIdx] || null;
 
-  const hasMissingCategories = expectedCategories !== undefined && returnedCategoryCount < expectedCategories;
-  if (hasMissingCategories) {
-    console.log(`[TrackingRole] Expected ${expectedCategories} categories but API returned ${returnedCategoryCount} (${categoryDetails.map(c => c.category).join(", ")}), treating missing categories as unranked`);
-    minAllScenarioRank = 0;
-  }
-
   const allComplete = minAllScenarioRank > 0 && minAllScenarioRank !== Infinity;
   const completeIdx = allComplete ? Math.min(minAllScenarioRank, ranks.length) - 1 : -1;
   const isAllCategoriesComplete = allComplete && completeIdx >= trackingIdx;
@@ -431,7 +423,7 @@ export async function getTrackingRankFromScenarios(
 ): Promise<{ trackingRank: string | null; isAllComplete: boolean; completeRank: string | null }> {
   const progress = await getKovaaksBenchmarkProgress(steamId, config.benchmarkId);
   if (!progress) return { trackingRank: null, isAllComplete: false, completeRank: null };
-  const result = getScenarioRankFromProgress(progress, config.ranks, config.expectedCategories);
+  const result = getScenarioRankFromProgress(progress, config.ranks);
   return { trackingRank: result.trackingRank, isAllComplete: result.isAllCategoriesComplete, completeRank: result.completeRank };
 }
 
@@ -442,10 +434,22 @@ export async function getTrackingRolesForPlayer(
   const processedBenchmarkIds = new Set<number>();
   const rolesPerBenchmark = new Map<number, { rank: string; isComplete: boolean }[]>();
 
+  // Fetch all scenario tracking results in parallel for benchmarks with EXVL data
+  const benchmarksWithRanks = benchmarks.filter(b => BENCHMARK_RANK_MAP[b.benchmarkId]);
   for (const b of benchmarks) {
     processedBenchmarkIds.add(b.benchmarkId);
-    const benchRanks = BENCHMARK_RANK_MAP[b.benchmarkId];
-    if (!benchRanks) continue;
+  }
+
+  const scenarioResults = await Promise.all(
+    benchmarksWithRanks.map(async (b) => {
+      const config = BENCHMARK_SCENARIO_CONFIGS[b.benchmarkId];
+      const result = config ? await getTrackingRankFromScenarios(steamId, config) : null;
+      return { benchmark: b, result };
+    })
+  );
+
+  for (const { benchmark: b, result: scenarioResult } of scenarioResults) {
+    const benchRanks = BENCHMARK_RANK_MAP[b.benchmarkId]!;
 
     const isUnranked = b.rankName === "Unranked" || !b.rankName;
     let energyBaseRank: string | null = null;
@@ -459,17 +463,9 @@ export async function getTrackingRolesForPlayer(
     const progressPct = b.progress <= 1 ? b.progress * 100 : b.progress;
     const energyComplete = energyBaseRank !== null && progressPct >= 100;
 
-    const config = BENCHMARK_SCENARIO_CONFIGS[b.benchmarkId];
-    let scenarioTrackingRank: string | null = null;
-    let scenarioAllComplete = false;
-    let scenarioCompleteRank: string | null = null;
-
-    if (config) {
-      const result = await getTrackingRankFromScenarios(steamId, config);
-      scenarioTrackingRank = result.trackingRank;
-      scenarioAllComplete = result.isAllComplete;
-      scenarioCompleteRank = result.completeRank;
-    }
+    const scenarioTrackingRank = scenarioResult?.trackingRank ?? null;
+    const scenarioAllComplete = scenarioResult?.isAllComplete ?? false;
+    const scenarioCompleteRank = scenarioResult?.completeRank ?? null;
 
     const isJP = JP_BENCHMARK_IDS.has(b.benchmarkId);
     if (isJP) {
@@ -525,14 +521,22 @@ export async function getTrackingRolesForPlayer(
     }
   }
 
-  for (const [benchIdStr, config] of Object.entries(BENCHMARK_SCENARIO_CONFIGS)) {
-    const benchId = parseInt(benchIdStr);
-    if (processedBenchmarkIds.has(benchId)) continue;
-    const benchRanks = BENCHMARK_RANK_MAP[benchId];
-    if (!benchRanks) continue;
+  // Fetch remaining benchmarks (not in EXVL data) in parallel
+  const remainingBenchmarks = Object.entries(BENCHMARK_SCENARIO_CONFIGS)
+    .filter(([benchIdStr]) => !processedBenchmarkIds.has(parseInt(benchIdStr)))
+    .filter(([benchIdStr]) => BENCHMARK_RANK_MAP[parseInt(benchIdStr)]);
 
+  const remainingResults = await Promise.all(
+    remainingBenchmarks.map(async ([benchIdStr, config]) => {
+      const benchId = parseInt(benchIdStr);
+      const result = await getTrackingRankFromScenarios(steamId, config);
+      return { benchId, config, result };
+    })
+  );
+
+  for (const { benchId, result } of remainingResults) {
+    const benchRanks = BENCHMARK_RANK_MAP[benchId]!;
     const isJPBench = JP_BENCHMARK_IDS.has(benchId);
-    const result = await getTrackingRankFromScenarios(steamId, config);
 
     if (isJPBench) {
       if (!JP_ROLE_BENCHMARK_IDS.has(benchId)) {
